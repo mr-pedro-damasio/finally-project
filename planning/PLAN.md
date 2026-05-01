@@ -163,13 +163,17 @@ Both the simulator and the Massive client implement the same abstract interface.
 - Free tier (5 calls/min): poll every 15 seconds
 - Paid tiers: poll every 2-15 seconds depending on tier
 - Parses REST response into the same format as the simulator
+- When `add_ticker` is called, the Massive client must immediately issue a one-shot poll for that single ticker to seed the cache before the next regular poll interval — this prevents a blank price row in the UI for up to 15 seconds
 
 ### Shared Price Cache
 
 - A single background task (simulator or Massive poller) writes to an in-memory price cache
-- The cache holds the latest price, previous price, and timestamp for each ticker
+- The cache holds the latest price, previous tick price, session-open price, and timestamp for each ticker
 - SSE streams read from this cache and push updates to connected clients
 - This architecture supports future multi-user scenarios without changes to the data layer
+- The cache exposes a `get_all_with_version()` method that atomically snapshots both the version counter and all price data under the cache lock — SSE generators must use this method to avoid a read-split race between the version check and data fetch
+- Ticker normalization (uppercase + strip whitespace) is applied at the `PriceCache` boundary — all callers receive canonicalized ticker symbols regardless of data source
+- `PriceCache` uses `threading.Lock` (not `asyncio.Lock`) because the Massive polling path writes from worker threads via `asyncio.to_thread` — do not change this to an async lock
 
 ### SSE Streaming
 
@@ -177,8 +181,10 @@ Both the simulator and the Massive client implement the same abstract interface.
 - Long-lived SSE connection; client uses native `EventSource` API
 - Server pushes price updates for all tickers known to the system at a regular cadence (~500ms) — in the single-user model this is equivalent to the user's watchlist
 - **The stream is dynamic**: when a ticker is added to or removed from the watchlist, the background price task automatically includes or excludes it in subsequent pushes — no client reconnect is required
-- Each SSE event contains ticker, price, previous price, timestamp, and change direction
+- Each SSE event contains: `ticker`, `price`, `prev_tick_price` (last tick's price), `session_open_price` (first price seen for this ticker in the current server session — set once, never updated), `timestamp`, and `direction`
 - Client handles reconnection automatically (EventSource has built-in retry)
+- The SSE generator emits a keepalive comment frame (`: ping`) every 15 seconds when no price updates have occurred, to prevent idle-timeout disconnections from intermediate proxies
+- `create_stream_router()` must create a fresh `APIRouter` instance on each call — never reuse a module-level router instance — to prevent duplicate route registration on hot-reload or in tests
 
 ---
 
@@ -286,6 +292,8 @@ Retention policy (applied by a background pruning task):
 | POST | `/api/watchlist` | Add a ticker: `{ticker}` |
 | DELETE | `/api/watchlist/{ticker}` | Remove a ticker |
 
+**Ticker validation**: All endpoints that accept a ticker (watchlist POST, trade POST) must validate the ticker against the regex `^[A-Z][A-Z0-9.\-]{0,9}$` before processing. Return HTTP 422 with a descriptive error for invalid tickers. This boundary check prevents malformed or malicious strings from reaching the database or market data layer and mitigates prompt-injection risk from the LLM chat path.
+
 ### Chat
 | Method | Path | Description |
 |--------|------|-------------|
@@ -363,6 +371,18 @@ When `LLM_MOCK=true`, the backend returns deterministic mock responses instead o
 - Development without an API key
 - CI/CD pipelines
 
+The mock response is fixed and must match exactly so E2E tests can make deterministic assertions:
+
+```json
+{
+  "message": "I've analyzed your portfolio. I'll buy 5 shares of AAPL for you and add MSFT to your watchlist.",
+  "trades": [{"ticker": "AAPL", "side": "buy", "quantity": 5}],
+  "watchlist_changes": [{"ticker": "MSFT", "action": "add"}]
+}
+```
+
+E2E tests should assert: the response message contains "AAPL", a buy trade for 5 AAPL executes (cash decreases, position appears), and MSFT appears in the watchlist.
+
 ---
 
 ## 10. Frontend Design
@@ -371,8 +391,8 @@ When `LLM_MOCK=true`, the backend returns deterministic mock responses instead o
 
 The frontend is a single-page application with a dense, terminal-inspired layout. The specific component architecture and layout system is up to the Frontend Engineer, but the UI should include these elements:
 
-- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load)
-- **Main chart area** — larger chart for the currently selected ticker, with at minimum price over time. Clicking a ticker in the watchlist selects it here.
+- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), session change % (computed as `(current_price − session_open_price) / session_open_price × 100`, displayed as "—" until the first SSE price arrives for that ticker), and a sparkline mini-chart (accumulated from SSE since page load)
+- **Main chart area** — larger chart for the currently selected ticker, accumulating price-over-time data from the SSE stream since page load (same approach as sparklines). Shows "Waiting for price data…" until at least one data point is received. Clicking a ticker in the watchlist selects it here.
 - **Portfolio heatmap** — treemap visualization where each rectangle is a position, sized by portfolio weight, colored by P&L (green = profit, red = loss)
 - **P&L chart** — line chart showing total portfolio value over time, using data from `portfolio_snapshots`. While no snapshots exist yet (first 30 seconds of a session), the chart area displays an informational message: "Waiting for first data point…"
 - **Positions table** — tabular view of all positions: ticker, quantity, avg cost, current price, unrealized P&L, % change
@@ -395,30 +415,33 @@ The frontend is a single-page application with a dense, terminal-inspired layout
 ### Multi-Stage Dockerfile
 
 ```
-Stage 1: Node 20 slim
+Stage 1: node:20-slim
   - Copy frontend/
   - npm install && npm run build (produces static export)
 
-Stage 2: Python 3.12 slim
+Stage 2: python:3.12-slim-bookworm
   - Install uv
   - Copy backend/
   - uv sync (install Python dependencies from lockfile)
   - Copy frontend build output into a static/ directory
+  - Set PYTHONUNBUFFERED=1 and PYTHONDONTWRITEBYTECODE=1
+  - Create and switch to a non-root user (e.g. appuser)
   - Expose port 8000
+  - HEALTHCHECK: GET /api/health every 30s, timeout 5s
   - CMD: uvicorn serving FastAPI app
 ```
 
-FastAPI serves the static frontend files and all API routes on port 8000.
+FastAPI serves the static frontend files and all API routes on port 8000. Pin base image versions explicitly (`node:20-slim`, `python:3.12-slim-bookworm`) — avoid `latest` tags.
 
 ### Docker Volume
 
-The SQLite database persists via a named Docker volume:
+The SQLite database persists via a bind mount to the `db/` directory in the project root:
 
 ```bash
-docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
+docker run -v "$(pwd)/db":/app/db -p 8000:8000 --env-file .env finally
 ```
 
-The `db/` directory in the project root maps to `/app/db` in the container. The backend writes `finally.db` to this path.
+Using a bind mount (not a named Docker volume) allows developers to inspect and backup the SQLite file directly from the host filesystem. The `db/.gitkeep` file ensures the directory exists in the repo; `db/finally.db` is gitignored. The backend writes `finally.db` to `/app/db/finally.db` inside the container.
 
 ### Start/Stop Scripts
 
@@ -451,6 +474,7 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio: trade execution logic, P&L calculations, edge cases (selling more than owned, buying with insufficient cash, selling at a loss)
 - LLM: structured output parsing handles all valid schemas, graceful handling of malformed responses, trade validation within chat flow
 - API routes: correct status codes, response shapes, error handling
+- **SSE integration tests (required)**: using `httpx.AsyncClient` against the FastAPI `TestClient`, assert: (a) response `Content-Type` is `text/event-stream`, (b) the bootstrap `retry: 1000` frame is present, (c) at least one `data:` frame is emitted within the test timeout, and (d) the generator cleans up on client disconnect. These tests must exist before the SSE endpoint is considered complete.
 
 **Frontend (React Testing Library or similar)**:
 - Component rendering with mock data
@@ -458,6 +482,10 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Watchlist CRUD operations
 - Portfolio display calculations
 - Chat message rendering and loading state
+
+### CI Requirement
+
+A GitHub Actions workflow (`.github/workflows/ci.yml`) running `uv run --extra dev pytest` and `uv run --extra dev ruff check app/ tests/` must be added before any PR after the market data phase. This is the automated safety net for an agent-driven codebase.
 
 ### E2E Tests (in `test/`)
 
@@ -476,15 +504,29 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 
 ---
 
-## 13. Open Questions (Deferred)
+## 13. Resolved Decisions
 
-The following items require a decision before the relevant component is built. The frontend agent should not implement these features until they are resolved.
+The following items were previously open questions. All have been resolved; the frontend and chat agents should use these decisions directly.
 
-**Section 10 — Main chart area: data source**
-The main chart shows "price over time" for the selected ticker, but there is no historical price API and the in-memory cache holds only the latest price. Decision needed: does the main chart accumulate data from SSE since page load (same as sparklines, starts empty), or do we add a backend endpoint for recent price history? If SSE-only, the UI should communicate this to the user.
+**Section 10 — Main chart area: data source** ✅ Resolved
+The main chart accumulates price data from the SSE stream since page load (same approach as sparklines). No additional backend endpoint is needed. The chart displays "Waiting for price data…" until at least one data point is received for the selected ticker.
 
-**Section 10 — Watchlist: change % definition**
-The watchlist shows a change percentage per ticker, but the simulator has no open/close concept. Decision needed: what is the reference price for this calculation — first price seen since page load, some fixed seed price, or something else?
+**Section 10 — Watchlist: change % definition** ✅ Resolved
+The `PriceUpdate` SSE event includes a `session_open_price` field: the first price received for that ticker in the current server session (set once on first cache write, never changed). The watchlist "session change %" column is computed as `(current_price − session_open_price) / session_open_price × 100`. Displayed as "—" until the first SSE price arrives. The field formerly called `previous_price` is renamed `prev_tick_price` throughout the cache and SSE payload to make its tick-to-tick semantics explicit and prevent frontend agents from misusing it as a session-open reference.
 
-**Section 9 — LLM mock: mock response content**
-`LLM_MOCK=true` requires a defined, deterministic response so E2E tests can make assertions against it. The specific mock content (message text, ticker, trade quantity/side, watchlist action) must be specified before the E2E test suite is written.
+**Section 9 — LLM mock: mock response content** ✅ Resolved
+See §9 LLM Mock Mode for the fixed mock response and E2E assertion guidance.
+
+---
+
+## 14. Backend Entrypoint Requirements
+
+`backend/app/main.py` is the FastAPI entrypoint and the integration point for all backend components. It must exist before any other agent builds on top of the backend. Required behavior:
+
+- Create a `PriceCache` instance
+- Use the factory (`backend/app/market/factory.py`) to create a `MarketDataSource` based on the `MASSIVE_API_KEY` environment variable
+- Start the data source in a FastAPI `lifespan` async context manager (start on startup, stop on shutdown — no background tasks started outside lifespan)
+- Mount the SSE router via `create_stream_router(price_cache)` using the `APIRouter` prefix `/api/stream`
+- Expose `GET /api/health` returning `{"status": "ok"}`
+- Do **not** add `CORSMiddleware` — the static export is served from the same origin, so CORS is not needed; adding `allow_origins=["*"]` would be a security regression
+- Do not log `MASSIVE_API_KEY`, `OPENROUTER_API_KEY`, or any secret value — and do not include them in error responses
