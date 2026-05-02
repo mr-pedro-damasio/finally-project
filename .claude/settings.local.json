@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run --extra dev python -c ' *)",
+      "Bash(git -C . show --stat HEAD --name-only)"
+    ]
+  }
+}

@@ -18,7 +18,10 @@
 				"charliermarsh.ruff",
 				"dbaeumer.vscode-eslint",
 				"esbenp.prettier-vscode",
-				"bradlc.vscode-tailwindcss"
+				"bradlc.vscode-tailwindcss",
+				"anthropic.claude-code",
+				"ms-azuretools.vscode-containers",
+				"google.geminicodeassist"
 			]
 		}
 	},
