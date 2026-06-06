@@ -1,11 +1,11 @@
 {
   "name": "${localWorkspaceFolderBasename}-devcontainer",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12-bookworm",
   "features": {
     "ghcr.io/devcontainers/features/copilot-cli:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
-    "ghcr.io/devcontainers/features/node:2": {}
+    "ghcr.io/devcontainers/features/node:1": {}
   },
   "customizations": {
     "vscode": {
