@@ -58,7 +58,9 @@ The user runs a single Docker command (or a provided start script). A browser op
 │                      (Next.js export)            │
 │                                                 │
 │  SQLite database (volume-mounted)               │
-│  Background task: market data polling/sim        │
+│  Background tasks:                              │
+│    • market data polling/sim                    │
+│    • portfolio snapshot recorder               │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -137,6 +139,7 @@ LLM_MOCK=false
 - If `MASSIVE_API_KEY` is set and non-empty → backend uses Massive REST API for market data
 - If `MASSIVE_API_KEY` is absent or empty → backend uses the built-in market simulator
 - If `LLM_MOCK=true` → backend returns deterministic mock LLM responses (for E2E tests)
+- If `LLM_MOCK` is absent or set to any value other than `"true"` → live LLM calls are made
 - The backend reads `.env` from the project root (mounted into the container or read via docker `--env-file`)
 
 ---
@@ -167,16 +170,18 @@ Both the simulator and the Massive client implement the same abstract interface.
 ### Shared Price Cache
 
 - A single background task (simulator or Massive poller) writes to an in-memory price cache
-- The cache holds the latest price, previous price, and timestamp for each ticker
+- The cache covers exactly the tickers on the current watchlist — no more, no less
+- Adding a ticker to the watchlist registers it in the cache and starts its simulation/polling; removing a ticker deregisters it
+- The cache holds, per ticker: `price`, `previous_price`, `session_open` (first recorded price since app start), and `timestamp`
+- `session_open` is set once when a ticker first enters the cache and never updated; it is the baseline for "session change %" calculations on the frontend
 - SSE streams read from this cache and push updates to connected clients
-- This architecture supports future multi-user scenarios without changes to the data layer
 
 ### SSE Streaming
 
 - Endpoint: `GET /api/stream/prices`
 - Long-lived SSE connection; client uses native `EventSource` API
-- Server pushes price updates for all tickers known to the system at a regular cadence (~500ms) — in the single-user model this is equivalent to the user's watchlist
-- Each SSE event contains ticker, price, previous price, timestamp, and change direction
+- Server pushes price updates for all tickers on the watchlist at a regular cadence (~500ms); the stream updates dynamically as tickers are added or removed
+- Each SSE event contains: `ticker`, `price`, `previous_price`, `session_open`, `timestamp`, `change_direction`
 - Client handles reconnection automatically (EventSource has built-in retry)
 
 ---
@@ -225,7 +230,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - `price` REAL
 - `executed_at` TEXT (ISO timestamp)
 
-**portfolio_snapshots** — Portfolio value over time (for P&L chart). Recorded every 30 seconds by a background task, and immediately after each trade execution.
+**portfolio_snapshots** — Portfolio value over time (for P&L chart). Recorded every 30 seconds by the snapshot background task, and immediately after each trade execution.
 - `id` TEXT PRIMARY KEY (UUID)
 - `user_id` TEXT (default: `"default"`)
 - `total_value` REAL
@@ -236,13 +241,23 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - `user_id` TEXT (default: `"default"`)
 - `role` TEXT (`"user"` or `"assistant"`)
 - `content` TEXT
-- `actions` TEXT (JSON — trades executed, watchlist changes made; null for user messages)
+- `executed_actions` TEXT (JSON — trades executed, watchlist changes made, trade results; null for user messages)
 - `created_at` TEXT (ISO timestamp)
 
 ### Default Seed Data
 
 - One user profile: `id="default"`, `cash_balance=10000.0`
 - Ten watchlist entries: AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX
+
+### Background Tasks
+
+Two independent asyncio tasks are started via FastAPI's lifespan context manager at app startup:
+
+**Market data task** — runs the simulator or Massive poller. Writes prices to the in-memory price cache. Registers the initial watchlist tickers on startup; the watchlist API registers/deregisters tickers dynamically as the user makes changes.
+
+**Portfolio snapshot task** — every 30 seconds, reads the current positions from the DB, looks up live prices from the price cache, computes total portfolio value, and inserts a row into `portfolio_snapshots`. Also called directly by the trade execution handler so a snapshot is recorded immediately after each trade.
+
+Both tasks are started in the lifespan context manager and run for the lifetime of the process. Neither task needs to coordinate with the other; they share only the in-memory price cache (read by snapshot, written by market data).
 
 ---
 
@@ -263,14 +278,14 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 ### Watchlist
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/watchlist` | Current watchlist tickers with latest prices |
+| GET | `/api/watchlist` | Current watchlist tickers with latest prices and session_open |
 | POST | `/api/watchlist` | Add a ticker: `{ticker}` |
 | DELETE | `/api/watchlist/{ticker}` | Remove a ticker |
 
 ### Chat
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/chat` | Send a message, receive complete JSON response (message + executed actions) |
+| POST | `/api/chat` | Send a message, receive complete JSON response (message + executed actions + trade results) |
 
 ### System
 | Method | Path | Description |
@@ -295,12 +310,12 @@ When the user sends a chat message, the backend:
 4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output, using the cerebras-inference skill
 5. Parses the complete structured JSON response
 6. Auto-executes any trades or watchlist changes specified in the response
-7. Stores the message and executed actions in `chat_messages`
+7. Stores the message and executed actions in `chat_messages` (`executed_actions` column)
 8. Returns the complete JSON response to the frontend (no token-by-token streaming — Cerebras inference is fast enough that a loading indicator is sufficient)
 
 ### Structured Output Schema
 
-The LLM is instructed to respond with JSON matching this schema:
+The LLM returns JSON matching this schema (the **LLM schema** — what is sent to and received from the model):
 
 ```json
 {
@@ -315,8 +330,24 @@ The LLM is instructed to respond with JSON matching this schema:
 ```
 
 - `message` (required): The conversational text shown to the user
-- `trades` (optional): Array of trades to auto-execute. Each trade goes through the same validation as manual trades (sufficient cash for buys, sufficient shares for sells)
-- `watchlist_changes` (optional): Array of watchlist modifications
+- `trades` (optional): Array of trades to auto-execute. Each trade goes through the same validation as manual trades (sufficient cash for buys, sufficient shares for sells). `quantity` supports decimals (fractional shares).
+- `watchlist_changes` (optional): Array of watchlist modifications. `action` is one of `"add"` | `"remove"`.
+
+The **API response** returned by `POST /api/chat` extends this with a backend-populated `trade_results` field:
+
+```json
+{
+  "message": "...",
+  "trades": [...],
+  "watchlist_changes": [...],
+  "trade_results": [
+    {"ticker": "AAPL", "side": "buy", "quantity": 10, "success": true, "price": 190.50},
+    {"ticker": "TSLA", "side": "buy", "quantity": 100, "success": false, "error": "Insufficient cash"}
+  ]
+}
+```
+
+`trade_results` is always present when `trades` is non-empty; it records the outcome of each attempted execution. The frontend renders these inline in the chat as trade confirmations or error notices.
 
 ### Auto-Execution
 
@@ -325,7 +356,7 @@ Trades specified by the LLM execute automatically — no confirmation dialog. Th
 - It creates an impressive, fluid demo experience
 - It demonstrates agentic AI capabilities — the core theme of the course
 
-If a trade fails validation (e.g., insufficient cash), the error is included in the chat response so the LLM can inform the user.
+If a trade fails validation (e.g., insufficient cash), the failure is recorded in `trade_results` with `success: false` and an `error` string. The frontend surfaces this inline in the chat so the user can see which trades succeeded and which did not.
 
 ### System Prompt Guidance
 
@@ -352,19 +383,19 @@ When `LLM_MOCK=true`, the backend returns deterministic mock responses instead o
 
 The frontend is a single-page application with a dense, terminal-inspired layout. The specific component architecture and layout system is up to the Frontend Engineer, but the UI should include these elements:
 
-- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load)
-- **Main chart area** — larger chart for the currently selected ticker, with at minimum price over time. Clicking a ticker in the watchlist selects it here.
+- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), session change % (calculated as `(price - session_open) / session_open × 100` using `session_open` from the SSE event), and a sparkline mini-chart (accumulated from SSE since page load)
+- **Main chart area** — larger price-over-time chart for the currently selected ticker, built from SSE-accumulated data since page load (starts empty; fills in progressively the same way sparklines do). Clicking a ticker in the watchlist selects it here.
 - **Portfolio heatmap** — treemap visualization where each rectangle is a position, sized by portfolio weight, colored by P&L (green = profit, red = loss)
 - **P&L chart** — line chart showing total portfolio value over time, using data from `portfolio_snapshots`
 - **Positions table** — tabular view of all positions: ticker, quantity, avg cost, current price, unrealized P&L, % change
-- **Trade bar** — simple input area: ticker field, quantity field, buy button, sell button. Market orders, instant fill.
+- **Trade bar** — simple input area: ticker field, quantity field (accepts decimals for fractional shares), buy button, sell button. Market orders, instant fill.
 - **AI chat panel** — docked/collapsible sidebar. Message input, scrolling conversation history, loading indicator while waiting for LLM response. Trade executions and watchlist changes shown inline as confirmations.
 - **Header** — portfolio total value (updating live), connection status indicator, cash balance
 
 ### Technical Notes
 
 - Use `EventSource` for SSE connection to `/api/stream/prices`
-- Canvas-based charting library preferred (Lightweight Charts or Recharts) for performance
+- **Lightweight Charts** (TradingView) for all charts — canvas-based, high performance, purpose-built for financial time series
 - Price flash effect: on receiving a new price, briefly apply a CSS class with background color transition, then remove it
 - All API calls go to the same origin (`/api/*`) — no CORS configuration needed
 - Tailwind CSS for styling with a custom dark theme
@@ -417,10 +448,6 @@ The `db/` directory in the project root maps to `/app/db` in the container. The 
 
 All scripts should be idempotent — safe to run multiple times.
 
-### Optional Cloud Deployment
-
-The container is designed to deploy to AWS App Runner, Render, or any container platform. A Terraform configuration for App Runner may be provided in a `deploy/` directory as a stretch goal, but is not part of the core build.
-
 ---
 
 ## 12. Testing Strategy
@@ -454,3 +481,12 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+**Running E2E tests**:
+
+```bash
+docker compose -f test/docker-compose.test.yml up --abort-on-container-exit
+```
+
+A `scripts/test.sh` wrapper should invoke this command.
+
