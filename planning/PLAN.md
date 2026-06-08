@@ -146,8 +146,6 @@ LLM_MOCK=false
 - If `LLM_MOCK` is absent or set to any value other than `"true"` → live LLM calls are made
 - The backend reads `.env` from the project root (mounted into the container or read via docker `--env-file`)
 
-> **TODO (actionable by any agent — not a note-to-self for whoever "owns" `.env.example`):** The committed `.env.example` at the repo root currently contains generic placeholders (`EXAMPLE_API_KEY=`, `EXAMPLE_DATABASE_URL=`) rather than the three variables documented above. It needs to be replaced with exactly the variable block shown earlier in this section — `OPENROUTER_API_KEY=your-openrouter-api-key-here`, `MASSIVE_API_KEY=`, `LLM_MOCK=false` — present (not commented out) with those exact placeholder/empty/default values, so that `cp .env.example .env` immediately yields a working setup: simulator-driven market data (no `MASSIVE_API_KEY`) and live LLM calls disabled by default (`LLM_MOCK=false`, awaiting a real `OPENROUTER_API_KEY`). This blocks the documented Quick Start in `README.md` ("copy `.env.example` to `.env` and fill in the values") from working on a fresh clone.
-
 ---
 
 ## 6. Market Data

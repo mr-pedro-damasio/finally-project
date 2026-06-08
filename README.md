@@ -108,7 +108,7 @@ cp .env.example .env
 finally/
 ├── frontend/    # Next.js TypeScript project (static export)
 ├── backend/     # FastAPI uv project (Python 3.12)
-│   └── db/      # Schema definitions and seed logic
+│   └── schema/  # Schema SQL definitions and seed logic
 ├── planning/    # Project documentation and agent contracts
 ├── test/        # Playwright E2E tests + docker-compose.test.yml
 ├── db/          # SQLite volume mount target (runtime only)
