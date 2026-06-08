@@ -3,6 +3,8 @@
 **Date:** 2026-02-10
 **Scope:** `backend/app/market/` (8 source files) and `backend/tests/market/` (6 test files)
 
+> **Resolution (2026-06-08):** All 7 issues identified in this review were resolved. All 73 tests now pass. See `MARKET_DATA_SUMMARY.md` for the current state.
+
 ---
 
 ## 1. Test Results Summary

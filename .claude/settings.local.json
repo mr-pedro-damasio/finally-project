@@ -1,4 +1,13 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest backend/tests/market/ -q --tb=no)",
+      "Bash(uv run *)",
+      "Bash(cp /workspaces/finally-project/planning/MARKET_DATA_DESIGN.md /workspaces/finally-project/planning/archive/MARKET_DATA_DESIGN.md)",
+      "Bash(rm /workspaces/finally-project/planning/MARKET_DATA_DESIGN.md)",
+      "Bash(mv /workspaces/finally-project/planning/DEPLOYMENT.md /workspaces/finally-project/planning/archive/DEPLOYMENT.md)"
+    ]
+  },
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true,
     "context7@claude-plugins-official": true,
