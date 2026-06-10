@@ -1,0 +1,19 @@
+# Python virtual environments (have host-absolute shebang paths baked in)
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/db/
+
+# Node modules and Next.js cache (rebuilt in Docker)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Local DB and secrets
+db/
+.env
+
+# Git and IDE
+.git/
+.gitignore
+**/.DS_Store

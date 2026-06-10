@@ -3,6 +3,8 @@
     "_ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
     "_ANTHROPIC_AUTH_TOKEN": "",
     "_ANTHROPIC_API_KEY": "",
-    "_ANTHROPIC_MODEL": "deepseek/deepseek-v4-pro"
-  }
+    "_ANTHROPIC_MODEL": "deepseek/deepseek-v4-pro",
+    "_CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "_teammateMode": "in-process"
 }

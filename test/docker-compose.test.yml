@@ -1,0 +1,33 @@
+version: '3.8'
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: finally-test:latest
+    ports:
+      - "8001:8000"
+    environment:
+      - LLM_MOCK=true
+      - DB_PATH=/app/db/finally.db
+      - STATIC_DIR=/app/static
+    tmpfs:
+      - /app/db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.48.0-jammy
+    depends_on:
+      app:
+        condition: service_healthy
+    working_dir: /tests
+    volumes:
+      - ./:/tests
+    environment:
+      - BASE_URL=http://app:8000
+    command: npx playwright test --reporter=list
