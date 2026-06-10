@@ -1,0 +1,159 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-accent: #ecad0a;
+  --color-primary: #209dd7;
+  --color-secondary: #753991;
+  --color-bg: #0d1117;
+  --color-surface: #12141f;
+  --color-surface-raised: #181b29;
+  --color-border: #232633;
+  --color-text-muted: #7d869c;
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  height: 100%;
+  background: #0d1117;
+  color: #e2e8f0;
+  font-family: var(--font-inter), system-ui, sans-serif;
+  position: relative;
+}
+
+/* Decorative radial glow behind the top of the page. Purely visual. */
+body::before {
+  content: '';
+  position: fixed;
+  top: -200px;
+  left: 0;
+  right: 0;
+  height: 400px;
+  background:
+    radial-gradient(ellipse 60% 100% at 20% 0%, rgba(236, 173, 10, 0.06), transparent 70%),
+    radial-gradient(ellipse 60% 100% at 80% 0%, rgba(32, 157, 215, 0.06), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Numeric/tabular data: prices, quantities, P&L, cash. */
+.font-mono {
+  font-family: var(--font-mono), 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes flashUp {
+  0% {
+    background-color: rgba(34, 197, 94, 0.25);
+    box-shadow: inset 0 0 12px rgba(34, 197, 94, 0.3);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: none;
+  }
+}
+
+@keyframes flashDown {
+  0% {
+    background-color: rgba(239, 68, 68, 0.25);
+    box-shadow: inset 0 0 12px rgba(239, 68, 68, 0.3);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: none;
+  }
+}
+
+.flash-up { animation: flashUp 600ms ease-out; }
+.flash-down { animation: flashDown 600ms ease-out; }
+
+/* Watchlist rows */
+.watchlist-row {
+  border-radius: 8px;
+  border-left: 2px solid transparent;
+  transition: background 150ms ease, transform 150ms ease, border-color 150ms ease;
+}
+.watchlist-row:hover {
+  background: var(--color-surface-raised);
+  transform: translateX(2px);
+}
+.watchlist-row.selected {
+  background: linear-gradient(90deg, rgba(32,157,215,0.14), transparent);
+  border-left: 2px solid var(--color-primary);
+}
+
+/* Position table rows */
+.position-row {
+  transition: background 150ms ease;
+}
+.position-row:hover {
+  background: var(--color-surface-raised);
+}
+
+/* Portfolio heatmap tiles */
+.heatmap-tile {
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+.heatmap-tile:hover {
+  transform: scale(1.03);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+}
+
+/* Inputs */
+.themed-input:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(32, 157, 215, 0.2);
+}
+
+/* Gradient buttons */
+.gradient-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+}
+.gradient-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+/* Chat "thinking" dots */
+@keyframes pulseDot {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40% { opacity: 1; transform: scale(1); }
+}
+.thinking-dots span {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 1px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  animation: pulseDot 1.2s infinite ease-in-out;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+/* New chat message entrance */
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.msg-fade-in {
+  animation: fadeSlideIn 200ms ease-out;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+::-webkit-scrollbar-thumb {
+  background: #232633;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2f3344;
+}
